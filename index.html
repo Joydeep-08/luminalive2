@@ -49,6 +49,10 @@ textarea{height:90px;line-height:1.6;}
 .photo-icon{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:22px;color:rgba(212,69,106,0.35);pointer-events:none;}
 .photo-icon small{font-size:10px;color:var(--muted);opacity:.6;margin-top:4px;}
 .photo-slot.filled .photo-icon{display:none;}
+.photo-uploading{position:absolute;inset:0;background:rgba(253,248,242,0.85);display:none;flex-direction:column;align-items:center;justify-content:center;gap:6px;z-index:5;font-size:11px;color:var(--muted);}
+.photo-slot.uploading .photo-uploading{display:flex;}
+.upload-spinner{width:22px;height:22px;border:2px solid rgba(212,69,106,0.2);border-top-color:var(--rose);border-radius:50%;animation:spin .7s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
 .del-x{position:absolute;top:4px;right:4px;width:20px;height:20px;border-radius:50%;background:rgba(255,255,255,0.95);border:none;font-size:10px;cursor:pointer;display:none;align-items:center;justify-content:center;z-index:4;color:#c0392b;font-weight:700;padding:0;}
 .photo-slot.filled .del-x{display:flex;}
 .add-balloon-btn{width:100%;padding:16px;background:rgba(212,69,106,0.06);border:2px dashed rgba(212,69,106,0.25);border-radius:18px;color:var(--rose);font-family:'Outfit',sans-serif;font-size:14px;font-weight:600;cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:8px;}
@@ -150,40 +154,14 @@ textarea{height:90px;line-height:1.6;}
 <script>
 var SUPA_URL = 'https://bakwdfnwzylefssdpacq.supabase.co';
 var SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJha3dkZm53enlsZWZzc2RwYWNxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgzNDgzNzYsImV4cCI6MjA5MzkyNDM3Nn0.EbbVZbn0w6YCtagb2tluonZ3IxFBn0F1lmrp0mW6ErA';
+var BUCKET = 'photos';
 
 (function(){var e=['🌸','🌺','🌼','🍀','🌹'],w=document.getElementById('petals');for(var i=0;i<14;i++){var d=document.createElement('div');d.className='petal';d.textContent=e[i%e.length];d.style.cssText='left:'+Math.random()*100+'%;animation-delay:'+Math.random()*18+'s;animation-duration:'+(10+Math.random()*12)+'s;font-size:'+(13+Math.random()*12)+'px;position:fixed;z-index:0;';w.appendChild(d);}})();
 
 var balloons=[],bCount=0;
 var colors=['🔴','🟠','🟡','🟣','🔵','🟢','🩷'];
 
-function addBalloon(){
-  var idx=bCount++;
-  balloons.push({msg:'',photoB64:null});
-  var item=document.createElement('div');
-  item.className='b-item';item.id='bi'+idx;
-  item.innerHTML='<div class="b-item-header"><div class="b-num">'+(idx+1)+'</div><div class="b-item-title">'+colors[idx%colors.length]+' Balloon '+(idx+1)+'</div><button class="b-del" onclick="removeBalloon('+idx+')">✕</button></div><div class="b-row"><div><label class="lbl">Photo (optional)</label><div class="photo-slot" id="ps'+idx+'"><input type="file" accept="image/*" onchange="loadPic('+idx+',this)"/><img id="pi'+idx+'" src="" alt=""/><div class="photo-icon">📷<small>Add photo</small></div><button class="del-x" type="button" onclick="removePic('+idx+',event)">✕</button></div></div><div style="display:flex;flex-direction:column;"><label class="lbl">Message *</label><textarea id="bm'+idx+'" placeholder="e.g. You are my sunshine ☀️" style="flex:1;min-height:80px;" oninput="updateMsg('+idx+',this.value)"></textarea></div></div>';
-  document.getElementById('balloonList').appendChild(item);
-}
-
-function removeBalloon(idx){var el=document.getElementById('bi'+idx);if(el)el.remove();if(balloons[idx])balloons[idx]=null;}
-
-function loadPic(idx,inp){
-  if(!inp.files||!inp.files[0])return;
-  var r=new FileReader();
-  r.onload=function(e){
-    compress(e.target.result,900,0.92).then(function(c){
-      balloons[idx].photoB64=c;
-      document.getElementById('pi'+idx).src=c;
-      document.getElementById('ps'+idx).classList.add('filled');
-    });
-  };
-  r.readAsDataURL(inp.files[0]);
-}
-
-function removePic(idx,e){e.stopPropagation();balloons[idx].photoB64=null;document.getElementById('pi'+idx).src='';document.getElementById('ps'+idx).classList.remove('filled');var inp=document.querySelector('#ps'+idx+' input[type=file]');if(inp)inp.value='';}
-function updateMsg(idx,val){if(balloons[idx])balloons[idx].msg=val;}
-addBalloon();addBalloon();addBalloon();
-
+// ── Compress to 600px webp at 0.72 quality ──
 function compress(dataURL,maxPx,q){
   return new Promise(function(res){
     var img=new Image();
@@ -192,11 +170,68 @@ function compress(dataURL,maxPx,q){
       if(w>h){if(w>maxPx){h=Math.round(h*maxPx/w);w=maxPx;}}else{if(h>maxPx){w=Math.round(w*maxPx/h);h=maxPx;}}
       var c=document.createElement('canvas');c.width=w;c.height=h;
       c.getContext('2d').drawImage(img,0,0,w,h);
-      res(c.toDataURL('image/jpeg',q));
+      res(c.toDataURL('image/webp',q));
     };
     img.src=dataURL;
   });
 }
+
+// ── Upload compressed blob to Supabase Storage, return public URL ──
+async function uploadToStorage(dataURL,idx){
+  var res=await fetch(dataURL);
+  var blob=await res.blob();
+  var fileName='balloon-'+Date.now()+'-'+idx+'.webp';
+  var uploadRes=await fetch(SUPA_URL+'/storage/v1/object/'+BUCKET+'/'+fileName,{
+    method:'POST',
+    headers:{
+      'apikey':SUPA_KEY,
+      'Authorization':'Bearer '+SUPA_KEY,
+      'Content-Type':'image/webp',
+      'x-upsert':'true'
+    },
+    body:blob
+  });
+  if(!uploadRes.ok) throw new Error('Photo upload failed: '+await uploadRes.text());
+  return SUPA_URL+'/storage/v1/object/public/'+BUCKET+'/'+fileName;
+}
+
+function addBalloon(){
+  var idx=bCount++;
+  balloons.push({msg:'',photoUrl:null});
+  var item=document.createElement('div');
+  item.className='b-item';item.id='bi'+idx;
+  item.innerHTML='<div class="b-item-header"><div class="b-num">'+(idx+1)+'</div><div class="b-item-title">'+colors[idx%colors.length]+' Balloon '+(idx+1)+'</div><button class="b-del" onclick="removeBalloon('+idx+')">✕</button></div><div class="b-row"><div><label class="lbl">Photo (optional)</label><div class="photo-slot" id="ps'+idx+'"><input type="file" accept="image/*" onchange="loadPic('+idx+',this)"/><img id="pi'+idx+'" src="" alt=""/><div class="photo-icon">📷<small>Add photo</small></div><div class="photo-uploading" id="pu'+idx+'"><div class="upload-spinner"></div><span>Uploading…</span></div><button class="del-x" type="button" onclick="removePic('+idx+',event)">✕</button></div></div><div style="display:flex;flex-direction:column;"><label class="lbl">Message *</label><textarea id="bm'+idx+'" placeholder="e.g. You are my sunshine ☀️" style="flex:1;min-height:80px;" oninput="updateMsg('+idx+',this.value)"></textarea></div></div>';
+  document.getElementById('balloonList').appendChild(item);
+}
+
+function removeBalloon(idx){var el=document.getElementById('bi'+idx);if(el)el.remove();if(balloons[idx])balloons[idx]=null;}
+
+// ── Load → compress → upload immediately on file pick ──
+function loadPic(idx,inp){
+  if(!inp.files||!inp.files[0])return;
+  var slot=document.getElementById('ps'+idx);
+  slot.classList.add('uploading');
+  var r=new FileReader();
+  r.onload=async function(e){
+    try{
+      var compressed=await compress(e.target.result,600,0.72);
+      var url=await uploadToStorage(compressed,idx);
+      balloons[idx].photoUrl=url;
+      document.getElementById('pi'+idx).src=url;
+      slot.classList.remove('uploading');
+      slot.classList.add('filled');
+    }catch(err){
+      slot.classList.remove('uploading');
+      showErr('Photo upload failed. Check your internet and try again.');
+      console.error(err);
+    }
+  };
+  r.readAsDataURL(inp.files[0]);
+}
+
+function removePic(idx,e){e.stopPropagation();balloons[idx].photoUrl=null;document.getElementById('pi'+idx).src='';document.getElementById('ps'+idx).classList.remove('filled');var inp=document.querySelector('#ps'+idx+' input[type=file]');if(inp)inp.value='';}
+function updateMsg(idx,val){if(balloons[idx])balloons[idx].msg=val;}
+addBalloon();addBalloon();addBalloon();
 
 function gatherData(){
   var herName=document.getElementById('herName').value.trim();
@@ -205,6 +240,7 @@ function gatherData(){
   if(!herName){showErr('Please enter her name 🌺');return null;}
   var active=balloons.filter(function(b){return b&&b.msg.trim();});
   if(!active.length){showErr('Add at least one balloon message 🎈');return null;}
+  if(document.querySelectorAll('.photo-slot.uploading').length){showErr('Please wait for photos to finish uploading 📸');return null;}
   return{n:herName,f:yourName,m:msg,b:active};
 }
 
@@ -228,7 +264,7 @@ function viewURL(id){
 async function doAction(isPreview){
   var d=gatherData();if(!d)return;
   d.isPreview=!!isPreview;
-  showLoading('Uploading…','Saving to cloud ☁️');
+  showLoading('Saving your surprise…','Almost there 🌺');
   try{
     var id=await saveToSupabase(d);
     hideLoading();
@@ -245,7 +281,7 @@ async function doAction(isPreview){
       document.getElementById('resultBox').style.display='block';
       document.getElementById('resultBox').scrollIntoView({behavior:'smooth',block:'center'});
     }
-  }catch(e){hideLoading();showErr('Upload failed: '+e.message);}
+  }catch(e){hideLoading();showErr('Failed: '+e.message);}
 }
 
 function showLoading(t,s){document.getElementById('loadingTitle').textContent=t;document.getElementById('loadingSub').textContent=s;document.getElementById('loadingOverlay').classList.add('show');}
